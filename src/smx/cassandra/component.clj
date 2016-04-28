@@ -1,4 +1,4 @@
-(ns smx.eventstore.cassandra.component
+(ns smx.cassandra.component
   (:require [clojure.core.async :as async]
             [clojure.tools.logging :as log]
             [qbits.alia :as alia]
@@ -10,16 +10,45 @@
            [com.datastax.driver.core Cluster Session PreparedStatement Statement]
            [com.datastax.driver.core.policies LoadBalancingPolicy RetryPolicy]))
 
-;;;;;;;;;;;;;;
-;;; Cluster
+;;;;;;;;;;;;;
+;;; Schema
+
+;;;;;;;;;;;;;;;;;
+;;; Connection
+
+(s/defschema RawQuery
+  "A raw query can either be a String or a Hayt map"
+  (s/either String IPersistentMap))
+
+(s/defschema AliaExecutable
+  "Alia is capable of executing these types of Statements/Queries"
+  (s/either RawQuery PreparedStatement Statement))
+
+(s/defschema Executable
+  "Connection is capable of executing these types of Statements/Queries"
+  (s/either Keyword AliaExecutable))
+
+(s/defschema Vals
+  "Vals may be positional (list) or named (map)"
+  (s/either [s/Any] {Keyword s/Any}))
+
+(s/defschema Command
+  "A tuple of Executable and optional values to be bound"
+  [(s/one Executable "Executable") (s/optional Vals "Values")])
+
+(s/defschema Queries
+  "Each connection can be configured with a map of RawQuery to prepare"
+  {Keyword RawQuery})
+
+(s/defschema Prepared
+  "When a Connection starts it converts any configured RawQuery into PreparedStatement"
+  {Keyword PreparedStatement})
 
 ;;;;;;;;;;;;;;;;;;;;
-;;; Configuration
+;;; Cluster Configuration
 
 (def ClusterConfig
   "Partial cluster configuration schema, for the full set see: alia/cluster docstring"
-  ;;TODO: add reconnection policy support and broaden load-balancing-policy to include DC aware
-  ;;TODO: requires thought and we don't need it right now
   {:contact-points                         [String]
    :port                                   Number
    (s/optional-key :query-options)         {(s/optional-key :fetch-size)         Number
@@ -56,10 +85,10 @@
   "Upgrade cluster configuration map"
   [config :- ClusterConfig]
   (-> (update config :retry-policy ->retry-policy)
-    (update :load-balancing-policy ->load-balancing-policy)))
+      (update :load-balancing-policy ->load-balancing-policy)))
 
-;;;;;;;;;;;;;;;;
-;;; Lifecycle
+;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Cluster Lifecycle
 
 (extend-protocol cp/Lifecycle
   Cluster
@@ -72,42 +101,8 @@
     (log/info "cluster stopped")
     this))
 
-;;;;;;;;;;;;;
-;;; Schema
-
-;;;;;;;;;;;;;;;;;
-;;; Connection
-
-(s/defschema RawQuery
-  "A raw query can either be a String or a Hayt map"
-  (s/either String IPersistentMap))
-
-(s/defschema AliaExecutable
-  "Alia is capable of executing these types of Statements/Queries"
-  (s/either RawQuery PreparedStatement Statement))
-
-(s/defschema Executable
-  "Connection is capable of executing these types of Statements/Queries"
-  (s/either Keyword AliaExecutable))
-
-(s/defschema Vals
-  "Vals may be positional (list) or named (map)"
-  (s/either [s/Any] {Keyword s/Any}))
-
-(s/defschema Command
-  "A tuple of Executable and optional values to be bound"
-  [(s/one Executable "Executable") (s/optional Vals "Values")])
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; Prepared Statements
-
-(s/defschema Queries
-  "Each connection can be configured with a map of RawQuery to prepare"
-  {Keyword RawQuery})
-
-(s/defschema Prepared
-  "When a Connection starts it converts any configured RawQuery into PreparedStatement"
-  {Keyword PreparedStatement})
 
 (s/defn ->prepared :- Prepared
   "Upgrade each RawQuery to a PreparedStatement"
@@ -116,10 +111,22 @@
   (reduce (fn [ret [k v]]
             (log/info "preparing" k v)
             (assoc ret k (alia/prepare session v))) {}
-    queries))
+          queries))
 
-;;;;;;;;;;;;
-;;; State
+(s/defn prepared :- (s/maybe PreparedStatement)
+  "Retrieve a prepared statement from the Connection"
+  [connection :- Connection
+   key :- Keyword]
+  (get-in connection [:prepared key]))
+
+(s/defn prepared? :- Boolean
+  "Has this connection prepared all statements described by queries?"
+  [connection :- Connection
+   queries :- Queries]
+  (every? #(prepared connection %) (keys queries)))
+
+;;;;;;;;;;;;;;;;
+;;; Component
 
 (s/defrecord Connection [keyspace :- String
                          queries :- (s/maybe Queries)
@@ -129,18 +136,17 @@
                          default-fetch-size :- (s/maybe Number)]
   cp/Lifecycle
   (start [this]
-    (let [{:keys [cluster keyspace queries]} this]
-      (assert (and cluster keyspace) "cluster and/or keyspace cannot be nil")
-      (let [session            (alia/connect cluster keyspace)
-            default-fetch-size (-> session
+    (assert (and cluster keyspace) "cluster and/or keyspace cannot be nil")
+    (let [session            (alia/connect cluster keyspace)
+          default-fetch-size (-> session
                                  .getCluster
                                  .getConfiguration
                                  .getQueryOptions
                                  .getFetchSize)]
-        (log/info "initializing connection with default-fetch-size" default-fetch-size)
-        (assoc this :session session
-                    :prepared (->prepared session queries)
-                    :default-fetch-size default-fetch-size))))
+      (log/info "initializing connection with default-fetch-size" default-fetch-size)
+      (assoc this :session session
+                  :prepared (->prepared session queries)
+                  :default-fetch-size default-fetch-size)))
   (stop [this]
     (log/info "closing connection")
     (alia/shutdown (:session this))
@@ -150,65 +156,53 @@
 ;;;;;;;;;;;;;
 ;;; Public
 
-(s/defn prepared
-  "Retrieve a PreparedStatement from the Connection"
-  [connection :- Connection
-   key :- Keyword]
-  (get-in connection [:prepared key]))
-
-(s/defn has-prepared? :- Boolean
-  "Does this connection contain all the PreparedStatement identified by keys"
-  [connection :- Connection
-   keys :- [Keyword]]
-  (every? #(prepared connection %) keys))
-
 (s/defn fetch-size :- Number
   "Get the fetch-size from opts, or default fetch size from connection"
   ([connection :- Connection]
-   (:default-fetch-size connection))
+    (:default-fetch-size connection))
   ([connection :- Connection
     opts]
-   (or (:fetch-size opts) (:default-fetch-size connection))))
+    (or (:fetch-size opts) (:default-fetch-size connection))))
 
 (s/defn execute
   ([connection executable]
-   (execute connection executable nil))
+    (execute connection executable nil))
   ([connection :- Connection
     executable :- Executable
     opts]
-   (log/trace "executing" executable opts)
-   (if-let [executable (if (keyword? executable) (prepared connection executable) executable)]
-     ;; Note: alia/execute-chan-buffered because of https://github.com/mpenet/alia/issues/29
-     (alia/execute-chan-buffered (:session connection) executable opts)
-     (let [err-chan (or (:channel opts) (async/chan 1))]
-       (async/put! err-chan (ex-info "invalid executable" {:executable executable}))
-       (async/close! err-chan)
-       err-chan))))
+    (log/trace "executing" executable opts)
+    (if-let [executable (if (keyword? executable) (prepared connection executable) executable)]
+      ;; Note: alia/execute-chan-buffered because of https://github.com/mpenet/alia/issues/29
+      (alia/execute-chan-buffered (:session connection) executable opts)
+      (let [err-chan (or (:channel opts) (async/chan 1))]
+        (async/put! err-chan (ex-info "invalid executable" {:executable executable}))
+        (async/close! err-chan)
+        err-chan))))
 
 (s/defn execute-batch
   ([connection commands]
-   (execute-batch connection commands :logged))
+    (execute-batch connection commands :logged))
   ([connection commands batch-type]
-   (execute-batch connection commands batch-type nil))
+    (execute-batch connection commands batch-type nil))
   ([connection :- Connection
     commands :- [Command]
     batch-type :- Keyword
     opts]
-   (try
-     (log/trace "executing batch" commands opts)
-     (alia/execute-chan-buffered
-       (:session connection)
-       (alia/batch (map (fn [[executable vals]]
-                          (if-let [executable (if (keyword? executable) (prepared connection executable) executable)]
-                            (alia/query->statement executable vals)
-                            (throw (ex-info "invalid executable" {:executable executable}))))
-                     commands) batch-type)
-       opts)
-     (catch Throwable thr
-       (let [err-chan (or (:channel opts) (async/chan 1))]
-         (async/put! err-chan thr)
-         (async/close! err-chan)
-         err-chan)))))
+    (try
+      (log/trace "executing batch" commands opts)
+      (alia/execute-chan-buffered
+        (:session connection)
+        (alia/batch (map (fn [[executable vals]]
+                           (if-let [executable (if (keyword? executable) (prepared connection executable) executable)]
+                             (alia/query->statement executable vals)
+                             (throw (ex-info "invalid executable" {:executable executable}))))
+                         commands) batch-type)
+        opts)
+      (catch Throwable thr
+        (let [err-chan (or (:channel opts) (async/chan 1))]
+          (async/put! err-chan thr)
+          (async/close! err-chan)
+          err-chan)))))
 
 ;;;;;;;;;;;;;;;;;;;;;
 ;;; Initialization
@@ -225,8 +219,8 @@
 
    Results returned on a core.async channel, exceptions may be placed on the channel at any point"
   ([keyspace]
-   (->connection keyspace nil))
+    (->connection keyspace nil))
   ([keyspace :- String
     queries :- (s/maybe Queries)]
-   (map->Connection {:keyspace keyspace
-                     :queries  queries})))
+    (map->Connection {:keyspace keyspace
+                      :queries  queries})))
