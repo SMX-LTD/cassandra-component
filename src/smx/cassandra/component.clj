@@ -22,16 +22,12 @@
   (s/either RawQuery PreparedStatement Statement))
 
 (s/defschema Executable
-  "Connection is capable of executing these types of Statements/Queries"
+  "We can execute either an AliaExecutable of a keyword identifying a PreparedStatement on the Connection"
   (s/either Keyword AliaExecutable))
 
-(s/defschema Vals
-  "Vals may be positional (list) or named (map)"
-  (s/either [s/Any] {Keyword s/Any}))
-
 (s/defschema Command
-  "A tuple of Executable and optional values to be bound"
-  [(s/one Executable "Executable") (s/optional Vals "Values")])
+  "A tuple of Executable and optional values (positional/list or named/map) to be bound"
+  [(s/one Executable "Executable") (s/optional (s/either [s/Any] {Keyword s/Any}) "Values")])
 
 (s/defschema Queries
   "Each connection can be configured with a map of RawQuery to prepare"
