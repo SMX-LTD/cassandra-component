@@ -13,9 +13,6 @@
 ;;;;;;;;;;;;;
 ;;; Schema
 
-;;;;;;;;;;;;;;;;;
-;;; Connection
-
 (s/defschema RawQuery
   "A raw query can either be a String or a Hayt map"
   (s/either String IPersistentMap))
@@ -44,8 +41,8 @@
   "When a Connection starts it converts any configured RawQuery into PreparedStatement"
   {Keyword PreparedStatement})
 
-;;;;;;;;;;;;;;;;;;;;
-;;; Cluster Configuration
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Cluster Configuration & Lifecycle
 
 (def ClusterConfig
   "Partial cluster configuration schema, for the full set see: alia/cluster docstring"
@@ -86,9 +83,6 @@
   [config :- ClusterConfig]
   (-> (update config :retry-policy ->retry-policy)
       (update :load-balancing-policy ->load-balancing-policy)))
-
-;;;;;;;;;;;;;;;;;;;;;;;;
-;;; Cluster Lifecycle
 
 (extend-protocol cp/Lifecycle
   Cluster
