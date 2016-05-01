@@ -80,8 +80,8 @@
   (-> (update config :retry-policy ->retry-policy)
       (update :load-balancing-policy ->load-balancing-policy)))
 
-(extend-protocol cp/Lifecycle
-  Cluster
+(extend-type Cluster 
+  cp/Lifecycle
   (start [this]
     (log/info "initializing cluster")
     (.init this))
